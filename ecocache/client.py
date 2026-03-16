@@ -18,7 +18,7 @@ import os
 os.environ['GEMINI_API_KEY'] = {repr(api_key)}
 from google import genai
 client = genai.Client(api_key={repr(api_key)})
-result = client.models.generate_content(model='gemini-1.5-flash-8b', contents={repr(prompt)})
+result = client.models.generate_content(model='gemini-2.0-flash', contents={repr(prompt)})
 print(result.text)
 """
     result = subprocess.run(
