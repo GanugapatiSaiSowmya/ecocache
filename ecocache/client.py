@@ -1,39 +1,51 @@
 import os
-from openai import OpenAI
+import json
+import subprocess
+import sys
 from dotenv import load_dotenv
 from .cache import SemanticCache
 from .metrics import SavingsTracker
 
 load_dotenv()
 
+def _call_gemini_subprocess(prompt: str, api_key: str) -> str:
+    """
+    Run the Gemini API call in a completely separate Python process
+    so it never conflicts with torch in the main process.
+    """
+    code = f"""
+import os
+os.environ['GEMINI_API_KEY'] = {repr(api_key)}
+from google import genai
+client = genai.Client(api_key={repr(api_key)})
+result = client.models.generate_content(model='gemini-1.5-flash-8b', contents={repr(prompt)})
+print(result.text)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Gemini call failed: {result.stderr[:300]}")
+    return result.stdout.strip()
+
+
 class EcoCacheClient:
     def __init__(self, api_key: str = None, similarity_threshold: float = 0.85):
-        # Use passed key or fall back to .env file
-        key = api_key or os.getenv("OPENAI_API_KEY")
-        if not key:
-            raise ValueError("No API key found. Pass one in or set OPENAI_API_KEY in your .env file.")
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if not self.api_key:
+            raise ValueError("No API key found. Set GEMINI_API_KEY in your .env file.")
 
-        self.llm = OpenAI(api_key=key)
         self.cache = SemanticCache(similarity_threshold=similarity_threshold)
         self.tracker = SavingsTracker()
 
-    def chat(self, prompt: str, model: str = "gpt-3.5-turbo") -> dict:
-        """
-        Drop-in replacement for a normal LLM call.
-        Checks cache first — only calls the API on a miss.
-
-        Returns a dict with:
-          - response: the answer text
-          - source: 'cache' or 'api'
-          - similarity: how close the match was (0-1)
-          - savings: running totals of water/carbon saved
-        """
-
-        # 1. Check the cache first
+    def chat(self, prompt: str, **kwargs) -> dict:
+        # 1. Check cache first
         cached_response, similarity = self.cache.get(prompt)
 
         if cached_response:
-            # Cache hit — return instantly, no API call
             self.tracker.record(prompt, was_cached=True, similarity=similarity)
             return {
                 "response": cached_response,
@@ -42,15 +54,11 @@ class EcoCacheClient:
                 "savings": self.tracker.summary()
             }
 
-        # 2. Cache miss — call the real API
-        print("Calling LLM API...")
-        completion = self.llm.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        response_text = completion.choices[0].message.content
+        # 2. Cache miss — call Gemini in a subprocess (avoids torch conflict)
+        print("Cache miss — calling Gemini API...")
+        response_text = _call_gemini_subprocess(prompt, self.api_key)
 
-        # 3. Store this new response so future similar queries hit cache
+        # 3. Store for future similar queries
         self.cache.store(prompt, response_text)
         self.tracker.record(prompt, was_cached=False, similarity=similarity)
 
@@ -62,5 +70,4 @@ class EcoCacheClient:
         }
 
     def summary(self):
-        """Print a summary of savings so far."""
         self.tracker.print_summary()
