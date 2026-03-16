@@ -1,0 +1,9 @@
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+cache_store.json
+cache_store.json.faiss
+savings.json
+.DS_Store
